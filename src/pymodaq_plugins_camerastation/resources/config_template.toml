@@ -1,0 +1,21 @@
+title = 'Configuration of the Camera Station PyMoDAQ extension (one file per machine)'
+
+[machine]
+# Name of this machine (recordings metadata, settings file station_<name>.json). Empty = host name.
+name = ""
+
+[paths]
+# Empty values = defaults inside the PyMoDAQ local folder: ~/.pymodaq/camera_station/...
+data_folder = ""
+recordings_folder = ""
+
+[recording]
+autostart = false              # start the recording when the extension opens (robust "always on" logger)
+max_file_mb = 1000             # rotation of the HDF5 session files
+max_file_hours = 12
+max_queue_mb = 200             # images waiting to be written above this are dropped (counted), never queued
+compression = 4                # gzip level of the images (1 fast ... 9 small)
+
+[ui]
+refresh_hz = 2                 # status table refresh rate
+preview_hz = 1                 # preview image refresh rate (when the preview is on)

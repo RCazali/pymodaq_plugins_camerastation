@@ -1,0 +1,72 @@
+[features]  # defines the plugin features contained into this plugin (read by hatch_build.py)
+instruments = true   # CameraStation 0D relay (published to computer A over LECO) + CamSim 2D simulated camera
+extensions = true    # the "Camera Station" dashboard extension
+models = false
+h5exporters = false
+scanners = false
+
+[urls]
+package-url = 'https://github.com/your-group/pymodaq_plugins_camerastation'  # adapt to your repository
+
+[project]
+name = "pymodaq_plugins_camerastation"
+description = 'Camera Station: PyMoDAQ extension of the camera computer (beam analysis -> 0D values for Laser Control, synchronised HDF5 logger)'
+dependencies = [
+    "pymodaq>=5.1.0",   # developed against 5.1.10
+    "numpy",
+    "h5py",
+    "toml",
+]
+authors = [
+    {name = "Laser Control contributors"},
+]
+maintainers = [
+    {name = "Laser Control contributors"},
+]
+
+# nottodo: leave everything below as is (PyMoDAQ plugin template conventions)
+
+dynamic = ["version", "urls", "entry-points"]
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = [
+    "hatchling>=1.9.0",
+    "hatch-vcs",
+    "toml",
+    "pymodaq_utils>=0.0.6",
+]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata.hooks.custom]
+
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.1.0"
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/hatch_build.py", "/README.md", "/LICENSE", "/docs", "/tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pymodaq_plugins_camerastation"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "pymodaq: integration tests that need PyMoDAQ control modules and a Qt application",
+]
