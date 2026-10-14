@@ -11,7 +11,7 @@ Works with PyMoDAQ 5.1.x (developed on 5.1.10) and 5.2.x.
 """
 from pathlib import Path
 
-from qtpy import QtCore, QtGui, QtWidgets
+from qtpy import QtCore, QtWidgets
 
 from pymodaq_gui import utils as gutils
 from pymodaq_utils.logger import set_logger, get_module_name
@@ -19,6 +19,7 @@ from pymodaq_utils.logger import set_logger, get_module_name
 from pymodaq.extensions.utils import CustomExt
 
 from pymodaq_plugins_camerastation.utils import Config as PluginConfig
+from pymodaq_plugins_camerastation.ui.icons import shape_icon as _icon, std_icon as _std_icon
 from pymodaq_plugins_camerastation.ui.station import CameraStationApp
 
 logger = set_logger(get_module_name(__file__))
@@ -26,29 +27,6 @@ plugin_config = PluginConfig()
 
 EXTENSION_NAME = 'Camera Station'
 CLASS_NAME = 'CameraStation'
-
-
-def _icon(color: str, shape: str = 'circle') -> QtGui.QIcon:
-    pix = QtGui.QPixmap(32, 32)
-    pix.fill(QtCore.Qt.transparent)
-    p = QtGui.QPainter(pix)
-    p.setRenderHint(QtGui.QPainter.Antialiasing)
-    p.setBrush(QtGui.QColor(color))
-    p.setPen(QtGui.QPen(QtGui.QColor('white'), 2))
-    if shape == 'square':
-        p.drawRoundedRect(4, 4, 24, 24, 4, 4)
-    elif shape == 'triangle':
-        p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(8, 4), QtCore.QPointF(28, 16), QtCore.QPointF(8, 28)]))
-    else:
-        p.drawEllipse(4, 4, 24, 24)
-    p.end()
-    return QtGui.QIcon(pix)
-
-
-def _std_icon(name: str) -> QtGui.QIcon:
-    style = QtWidgets.QApplication.style()
-    sp = getattr(QtWidgets.QStyle, name, None)
-    return style.standardIcon(sp) if sp is not None else QtGui.QIcon()
 
 
 class CameraStation(CustomExt):
@@ -78,10 +56,13 @@ class CameraStation(CustomExt):
         self.setup_docks_and_widgets()
 
     def setup_menus_and_toolbars(self, menubar=None):
+        # PyMoDAQ 5.3: only the "Show dashboard" button (the dashboard checks it when it opens the
+        # extension). Not the experiment / state managers: they act on the dashboard, not on the station,
+        # which has its own settings profiles (Settings > Profiles).
         create = getattr(self, 'create_dashboard_toolbar', None)
         if create is not None and getattr(self.dashboard, 'experiment_manager', None) is not None:
             try:
-                create(add_break=False)
+                create(add_dashboard=True, add_experiment=False, add_state=False, add_break=False)
             except Exception as e:  # pragma: no cover - never block the extension for a toolbar
                 logger.warning(f'dashboard toolbar not created: {e}')
 
@@ -93,9 +74,10 @@ class CameraStation(CustomExt):
         self.add_action('note', 'Note', _std_icon('SP_FileDialogDetailedView'), 'Write a note in the recording')
         self.add_action('snapshot', 'Snapshot', _std_icon('SP_DialogSaveButton'),
                         'Record the current image of every camera')
-        self.add_action('grab', 'Grab cameras', _icon('#2ecc71', 'triangle'),
-                        'Start the grab of the camera viewers and of the CameraStation relay')
-        self.add_action('stop_grab', 'Stop cameras', _icon('#95a5a6', 'square'), 'Stop the grab of these viewers')
+        self.add_action('grab', 'Grab all', _icon('#2ecc71', 'triangle'),
+                        'Grab all the cameras of the station and the CameraStation relay '
+                        '(one camera: ▶ in its panel)')
+        self.add_action('stop_grab', 'Stop all', _icon('#95a5a6', 'square'), 'Stop all the cameras and the relay')
         self.add_action('refresh_hardware', 'Reload modules', _std_icon('SP_BrowserReload'),
                         'Re-attach the dashboard viewers (after adding / changing modules)')
 

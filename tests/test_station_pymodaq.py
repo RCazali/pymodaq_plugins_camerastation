@@ -170,7 +170,8 @@ def test_stale_camera_publishes_nan(station):
     st.params.child('station', 'stale_s').setValue(1.0)
     out.stop_grab()
     cam = next(c for c in st.station.cameras if c.detector == 'Output cam')
-    assert wait(lambda: st.engine.state(cam.id, 1.0) == 'no_frames', 10)
+    # frames queued in the GUI before the stop may still arrive: wait for the result itself to be stale
+    assert wait(lambda: st.engine.state(cam.id, 1.0) == 'no_frames' and st.engine.snapshot(cam.id)['age'] > 1.2, 15)
     payload = st.publisher.build([(cam.name, cam.labels(), st.engine.snapshot(cam.id))], time.time(), 1.0)
     assert payload[cam.name]['valid'] == 0.0 and math.isnan(payload[cam.name]['x'])
     st.grab_all(True)                       # restarts only what is stopped (out.grab() needs a UI)
@@ -233,8 +234,73 @@ def test_scripts_live_edit_publish_and_preview(station):
     st.params.child('scripts', 'script__live', 'publish').setValue(False)
 
 
+def test_camera_panels_grab_snap_one_camera(station):
+    st, disk, out, relay, data = station
+    cam = next(c for c in st.station.cameras if c.detector == 'Output cam')
+    assert set(st.panels) == {c.id for c in st.station.cameras}
+    st.grab_camera(cam.id, False)
+    assert wait(lambda: not out.grab_state, 5)
+    assert disk.grab_state and relay.grab_state                  # the other camera and the relay go on
+    st._refresh_ui()
+    panel = st.panels[cam.id]
+    assert not panel.grab_btn.isChecked() and 'analysed' in panel.rates.text()
+    wait(lambda: False, 0.5)                                       # last frame in flight
+    done = st.engine.snapshot(cam.id)['frames_done']
+    st.snap_camera(cam.id)                                        # one frame, analysed whatever the gate
+    assert wait(lambda: st.engine.snapshot(cam.id)['frames_done'] == done + 1, 10)
+    wait(lambda: False, 0.5)
+    assert st.engine.snapshot(cam.id)['frames_done'] == done + 1 and not out.grab_state
+    st.grab_camera(cam.id, True)
+    assert wait(lambda: out.grab_state and st.engine.snapshot(cam.id)['frames_done'] > done + 2, 10)
+    st._refresh_ui()
+    assert panel.grab_btn.isChecked() and 'x ' in panel.values.text()
+
+
+def test_trends_get_every_result_and_plots_can_be_hidden(station):
+    st, disk, out, relay, data = station
+    cam = next(c for c in st.station.cameras if c.detector == 'Output cam')
+    st._refresh_trends()
+    n0 = st.trends.rings[(cam.name, 'x')].i
+    wait(lambda: False, 1.5)
+    st._refresh_trends()
+    assert st.trends.rings[(cam.name, 'x')].i > n0
+    key = f'{cam.name}/x'
+    assert key in [s.key for s in st.trends.specs]
+    assert st.trends.specs[0].key.startswith(st.station.cameras[0].name)
+    assert f'{cam.name}/peak' not in [s.key for s in st.trends.specs]             # off by default
+    st.params.child('trends_group', 'plots', key.replace('/', '__')).setValue(False)
+    assert st.station.trend_choices[key] is False and key not in [s.key for s in st.trends.specs]
+    st.params.child('trends_group', 'plots', key.replace('/', '__')).setValue(True)
+    assert key in [s.key for s in st.trends.specs]
+
+
+def test_settings_profiles(station):
+    st, disk, out, relay, data = station
+    old_hz = st.station.publish_hz
+    assert st.save_profile('alignment')
+    assert 'alignment' in st.profiles.names()
+    st.params.child('station', 'publish_hz').setValue(old_hz + 3)
+    assert st.station.publish_hz == old_hz + 3
+    assert st.load_profile('alignment')
+    assert st.station.publish_hz == old_hz
+    assert st.params.child('station', 'publish_hz').value() == old_hz
+    assert st.params.child('profiles', 'profile').value() == 'alignment'
+    assert set(st._links) == {c.id for c in st.station.cameras} and set(st.panels) == set(st._links)
+    cam = next(c for c in st.station.cameras if c.kind == 'disk')
+    assert st.engine.runtime(cam.id).analyzer.settings is cam                     # the engine uses the new settings
+    done = st.engine.snapshot(cam.id)['frames_done']
+    assert wait(lambda: st.engine.snapshot(cam.id)['frames_done'] > done, 10)
+    assert st.engine.snapshot(cam.id)['result'].get('valid') == 1.0               # reference reloaded
+    assert st.delete_profile('alignment') and 'alignment' not in st.profiles.names()
+
+
 def test_settings_persisted(station):
     st, disk, out, relay, data = station
+    st._refresh_ui()
+    st.log.take_new()
+    hidden = [line for line in st.log.lines
+              if any(k in line for k in ('status refresh:', 'trends:', 'preview:', 'not applied', 'Traceback'))]
+    assert not hidden, hidden                          # the GUI slots catch their errors: none must be hidden
     st._save_settings()
     from pymodaq_plugins_camerastation.core.settings import SettingsStore
     back = SettingsStore(st.store.path).load()

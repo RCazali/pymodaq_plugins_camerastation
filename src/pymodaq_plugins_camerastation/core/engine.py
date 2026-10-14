@@ -2,8 +2,12 @@
 
 Load and robustness rules:
 
-* **rate gate**: a camera is analysed at most ``rate_hz`` times per second; the other frames are only
-  counted (no copy, no work). The camera itself may run faster without costing anything here.
+* **rate gate**: a camera is analysed at most ``rate_hz`` times per second on average; the other
+  frames are only counted (no copy, no work). The camera itself may run faster without costing
+  anything here. Token bucket (at most ``GATE_BURST`` frames in a row), timed with the acquisition
+  time of the frame when known: frames delivered in bursts by a busy GUI thread keep their real
+  spacing. A minimum interval would analyse a 15 Hz camera at 7.5 Hz with a 10 Hz gate, and drop
+  frames of an 8 Hz camera delivered in pairs. A *snap* (``force_next``) is always analysed.
 * **latest wins**: one pending frame per camera at most. If the worker is late, the older pending
   frame is replaced, never queued: memory and latency are bounded, whatever happens.
 * **one worker**: the analyses never use more than one core, the GUI thread never computes.
@@ -25,6 +29,8 @@ from typing import Callable, Dict, Iterable, List, Optional
 import numpy as np
 
 from .analysis import CameraAnalyzer, nan_result
+
+GATE_BURST = 2.0          # rate gate: frames analysed in a row at most (token bucket capacity)
 
 ST_OFF, ST_WAITING, ST_OK, ST_INVALID, ST_NO_FRAMES, ST_ERROR = 'off', 'waiting', 'ok', 'invalid', 'no_frames', 'error'
 
@@ -93,7 +99,10 @@ class CameraRuntime:
         self.frames_in = 0
         self.dropped_pending = 0
         self.last_frame_mono: Optional[float] = None
-        self.last_submit_mono = -math.inf
+        self.tokens = 1.0                       # rate gate: analyses allowed now (token bucket)
+        self.gate_t: Optional[float] = None     # time of the previous frame for the gate
+        self.gate_acq = False                   # gate timed with acquisition times (else arrival)
+        self.force_next = False                 # snap: the next frame is analysed whatever the gate
         self.latest = None                      # (image, frame number, wall time): latest frame received
         self.in_rate = RateMeter()
         self.capture: Optional[Capture] = None
@@ -168,8 +177,11 @@ class AnalysisEngine:
         return self._thread is not None and self._thread.is_alive()
 
     # ------------------------------------------------------------------ intake (GUI thread)
-    def submit(self, cam_id: str, image, t_wall: Optional[float] = None) -> bool:
-        """New frame of a camera. Returns True when it was handed to the worker."""
+    def submit(self, cam_id: str, image, t_wall: Optional[float] = None, acquired: bool = False) -> bool:
+        """New frame of a camera. Returns True when it was handed to the worker.
+
+        ``t_wall``: time of the frame (wall clock), default now; ``acquired``: ``t_wall`` is the
+        acquisition time given by the plugin, the rate gate uses it instead of the arrival time."""
         rt = self.cameras.get(cam_id)
         if rt is None or image is None:
             return False
@@ -188,10 +200,20 @@ class AnalysisEngine:
                 rt.error = f'capture failed: {e}'
         if not rt.cfg.enabled:
             return False
-        period = 1.0 / max(rt.cfg.rate_hz, 1e-3)
-        if now - rt.last_submit_mono < 0.9 * period:      # 10 % tolerance for the camera jitter
+        acquired = acquired and t_wall is not None
+        gate_t = t_wall if acquired else now
+        if rt.gate_t is None or acquired != rt.gate_acq:     # first frame, or the clock changed
+            rt.gate_acq, rt.tokens = acquired, 1.0
+        else:
+            rt.tokens = min(GATE_BURST, rt.tokens + max(gate_t - rt.gate_t, 0.0) * rt.cfg.rate_hz)
+        rt.gate_t = gate_t
+        if rt.force_next:
+            rt.force_next = False
+            rt.tokens = max(rt.tokens - 1.0, 0.0)
+        elif rt.tokens >= 1.0:
+            rt.tokens -= 1.0
+        else:
             return False
-        rt.last_submit_mono = now
         with self._cv:
             if cam_id in self._pending:
                 rt.dropped_pending += 1
@@ -199,6 +221,12 @@ class AnalysisEngine:
             self._pending[cam_id] = (image, rt.frames_in, rt.latest[2])
             self._cv.notify()
         return True
+
+    def force_next(self, cam_id: str):
+        """Snap: the next frame of this camera is analysed whatever the rate gate."""
+        rt = self.cameras.get(cam_id)
+        if rt is not None:
+            rt.force_next = True
 
     def start_capture(self, cam_id: str, what: str, n: int, done: Callable[[str, np.ndarray], None]) -> bool:
         rt = self.cameras.get(cam_id)

@@ -20,7 +20,8 @@ part of the BeamAnalyzer extension with an extension designed for **robustness a
 
 | Rule | How |
 |---|---|
-| Bounded CPU | Each camera is analysed at most *Max rate* times per second (default 2 Hz); extra frames are dropped before any work. One worker thread for all cameras: the analyses never use more than one core, the GUI thread never computes. |
+| Bounded CPU | Each camera is analysed at most *Max rate* times per second on average (default 2 Hz); extra frames are dropped before any work. The gate is timed with the acquisition time of each frame, so a busy GUI that delivers frames in bursts does not lower the rate (a 15 Hz camera with a 10 Hz gate gives 10 analyses/s). One worker thread for all cameras: the analyses never use more than one core, the GUI thread never computes. |
+| Display ≠ analysis | The panels, preview and trends refresh at *Display rate* (default 5 Hz), whatever the analysis rate; every result is still plotted and recorded. |
 | Cheap analysis | ROI + binning (default 2) + moments from the row / column projections: **~4 ms for a 1.3 Mpx frame** on the office computer (binning 2). |
 | Bounded memory / latency | One pending frame per camera at most ("latest wins"); the image recording queue is bounded in MB (images dropped and counted, never the GUI blocked). |
 | Never a fake value | No beam, no reference, a camera that stopped, an analysis error → **NaN and `valid = 0`**, never 0.0 or a frozen value (same rule as S12 of Laser Control). A camera without result for *Stale after* seconds publishes NaN. |
@@ -77,9 +78,26 @@ python -m pymodaq_plugins_camerastation.extensions.camera_station camera_sim
 ```
 
 Two simulated cameras (`Disk cam`: disk fluorescence depleted by two passes; `Output cam`: a drifting
-beam) and the `CameraStation` relay. Click **Grab cameras** in the toolbar. For the disk: untick *Laser
-on* in the settings of the `Disk cam` viewer, **Capture reference (laser OFF)** in *Cameras > Disk >
-Disk*, then tick *Laser on* again.
+beam, 15 fps by default) and the `CameraStation` relay. Click **Grab** (green triangle) in the panel of a
+camera, or **Grab all** in the toolbar. For the disk: untick *Laser on* in the settings of the `Disk cam`
+viewer, **Capture reference (laser OFF)** in the camera settings (⚙ > Disk), then tick *Laser on* again.
+
+## The window
+
+- **Cameras** (centre): the station status (publication, recording, CPU), then one panel per camera,
+  like a viewer of the dashboard: **Snap** (one frame, analysed whatever the rate gate), **Grab**
+  (continuous; also starts the relay to A), **Stop**, **Preview** (shows this camera in the Preview tab),
+  **⚙** (its settings). Two lines: camera rate → analysed rate (max) and calc time; the results. A third
+  line says why there is no value (camera stopped, no beam, no reference…).
+- **Trends** (right, tabbed with Preview, Scripts and Log): one plot per quantity (x, y, σx, σy, sum…),
+  each with its own scale, every result plotted, last value in the title. *Settings > Trends*: on / off
+  (off = no display cost), history, which plots (peak, kurtosis and saturation are off by default).
+  The CameraStation 0D viewer of the dashboard stays the bridge to A; it is not meant for viewing.
+- **Settings** (left): **Profiles** (save the whole station settings under a name, load, delete:
+  e.g. "alignment" / "run"), Station (rates, recording, preview), Trends, Scripts.
+
+On PyMoDAQ 5.3 the toolbar has *Show dashboard* only: the experiment / state managers of 5.3 act on the
+dashboard, not on the station, whose settings are its profiles.
 
 ## Commissioning in the lab (computer B)
 
@@ -88,13 +106,14 @@ Disk*, then tick *Laser on* again.
 2. **Reduce the load of the camera viewers** (the biggest CPU cost): in each camera viewer, untick
    *Show data and process* (frames still reach the station), or set a *Refresh time* of 500–1000 ms.
    Lower the camera frame rate / exposure-limited rate when possible: the station only needs 1–2 Hz.
-3. **Camera Station**: *Add camera* (takes the next free 2D viewer), give it a short **name** (`Disk`,
-   `Output`, `PM_near`, `PM_far`, `Plasma`…: this is the channel name on A), choose the analysis, the
-   ROI (or drag it in the preview), binning 2–4, *Saturation* (4095 for a 12-bit camera).
-   Disk camera: mask centre / radius, **Capture reference** with the laser off (average of N frames).
-4. **Grab cameras** (toolbar) starts the camera viewers and the relay; the status table shows each
-   camera (incoming / analysed rate, calc time, values, reason when invalid) and the bottom line the
-   publication, the recording, the trigger folder and the CPU load of the process.
+3. **Camera Station**: *＋ Add camera* (takes the next free 2D viewer), then in its ⚙ settings give it a
+   short **name** (`Disk`, `Output`, `PM_near`, `PM_far`, `Plasma`…: this is the channel name on A),
+   choose the analysis, the ROI (or drag it in the preview), binning 2–4, *Saturation* (4095 for a
+   12-bit camera). Disk camera: mask centre / radius, **Capture reference** with the laser off (average
+   of N frames). Save the result as a **profile**.
+4. **Grab** each camera from its panel (or **Grab all**): the panel shows the incoming / analysed rate,
+   calc time, values and the reason when invalid; the top of the Cameras dock shows the publication,
+   the recording, the trigger folder and the CPU load of the process.
 5. **On computer A (Laser Control)**: signal roles `Disk_x` = `LECO_B/Disk/x`…, and in *Advanced →
    Frame counters* the heartbeat `LECO_B/Stats/frame_counter`.
 6. **Events (optional, not available in the lab today)**: only with a folder shared between A and B
@@ -181,6 +200,7 @@ m['clock_offset_median']                          # t_A - t_B (s)
 |---|---|
 | `config_camerastation.toml` | PyMoDAQ configuration folder (machine name, folders, recording) |
 | `station_<machine>.json` (+ `.bak`) | `~/.pymodaq/camera_station/` (cameras and settings) |
+| `profiles/<name>.json` | `~/.pymodaq/camera_station/profiles/` (saved settings profiles) |
 | `references/*.npy` | `~/.pymodaq/camera_station/references/` (disk references, dark frames) |
 | `recordings/YYYY-MM-DD/station_*.h5` | `~/.pymodaq/camera_station/recordings/` |
 | `logs/camera_station.log` | `~/.pymodaq/camera_station/logs/` (rotating, repeated messages folded) |
@@ -200,12 +220,24 @@ src/pymodaq_plugins_camerastation/
 │   ├── settings.py    validated settings, atomic JSON
 │   └── sim.py         synthetic frames (tests, CamSim)
 ├── relay.py      Qt bus extension → relay plugin
-├── ui/           station.py (controller), params.py (trees), preview.py
+├── ui/           station.py (controller), params.py (trees), camera_panel.py, trends.py, preview.py, icons.py
 ├── extensions/camera_station.py      the PyMoDAQ extension
 ├── daq_viewer_plugins/plugins_0D/    CameraStation relay
 ├── daq_viewer_plugins/plugins_2D/    CamSim
-└── tools/sim_preset.py               office simulator configuration
+├── tools/sim_preset.py               office simulator configuration
+└── tools/resize_watch.py             diagnosis: which widget keeps resizing (display that keeps moving)
 ```
+
+## A display that keeps moving (diagnosis)
+
+If a window starts to move / resize by itself after a dock edge was dragged:
+
+```bash
+python -m pymodaq_plugins_camerastation.tools.resize_watch <experiment or preset>
+```
+
+loads the dashboard alone and prints, every second, the widgets resized more than 10 times in that
+second, with their class, size and dock: what a bug report to PyMoDAQ needs.
 
 ## Points to check in the lab
 

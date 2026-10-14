@@ -106,6 +106,10 @@ class StationConfig:
     burst_frames: int = 5             # images saved after a trigger event (per camera)
     trigger_folder: str = ''          # folder where Laser Control writes its event files (O8)
     preview: bool = False             # preview image (costs a little CPU, off by default)
+    display_hz: float = 5.0           # refresh of the camera panels, preview and trends (display only)
+    trends: bool = True               # trend plots of the results in the extension
+    trend_history_s: float = 300.0    # time span of the trend plots
+    trend_choices: Dict[str, bool] = field(default_factory=dict)   # trend plot key -> shown (user choice)
     script_timeout_s: float = 10.0    # a user script running longer is disabled (core.scripts)
     script_settings: Dict[str, Dict[str, Any]] = field(default_factory=dict)   # name -> {publish, params}
     cameras: List[CameraConfig] = field(default_factory=list)
@@ -127,6 +131,11 @@ class StationConfig:
         self.burst_frames = int(_num(self.burst_frames, 5, 0, 100, int))
         self.trigger_folder = str(self.trigger_folder or '')
         self.preview = bool(self.preview)
+        self.display_hz = _num(self.display_hz, 5.0, 0.5, 20.0)
+        self.trends = bool(self.trends)
+        self.trend_history_s = _num(self.trend_history_s, 300.0, 10.0, 7200.0)
+        choices = self.trend_choices if isinstance(self.trend_choices, dict) else {}
+        self.trend_choices = {str(k): bool(v) for k, v in choices.items() if k}
         self.script_timeout_s = _num(self.script_timeout_s, 10.0, 1.0, 600.0)
         ss = self.script_settings if isinstance(self.script_settings, dict) else {}
         self.script_settings = {}
@@ -223,3 +232,44 @@ class SettingsStore:
             except OSError:
                 pass
         tmp.replace(self.path)
+
+
+class ProfileStore:
+    """Named copies of the station settings (``<folder>/<name>.json``), e.g. "alignment", "run".
+
+    Loading a profile replaces the current settings (the current file keeps being the working copy)."""
+
+    def __init__(self, folder: Path):
+        self.folder = Path(folder)
+
+    def names(self) -> List[str]:
+        try:
+            return sorted(p.stem for p in self.folder.glob('*.json'))
+        except OSError:
+            return []
+
+    def path(self, name: str) -> Path:
+        return self.folder / f'{clean_name(name, "profile")}.json'
+
+    def save(self, name: str, station: StationConfig) -> str:
+        path = self.path(name)
+        SettingsStore(path).save(station)
+        return path.stem
+
+    def load(self, name: str) -> Tuple[Optional[StationConfig], str]:
+        """(settings, error text); settings is None when the profile is missing or unreadable."""
+        path = self.path(name)
+        if not path.exists():
+            return None, f'profile "{name}" not found'
+        store = SettingsStore(path)
+        st = store.load()
+        if store.load_error:
+            return None, f'profile "{name}": {store.load_error}'
+        return st, ''
+
+    def delete(self, name: str) -> bool:
+        try:
+            self.path(name).unlink()
+            return True
+        except OSError:
+            return False

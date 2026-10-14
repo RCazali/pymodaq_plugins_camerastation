@@ -46,6 +46,7 @@ def resolve_paths(config, override: Path = None) -> dict:
         'data': base,
         'references': base / 'references',
         'scripts': base / 'scripts',
+        'profiles': base / 'profiles',
         'recordings': Path(rec) if rec else base / 'recordings',
         'logs': base / 'logs',
     }

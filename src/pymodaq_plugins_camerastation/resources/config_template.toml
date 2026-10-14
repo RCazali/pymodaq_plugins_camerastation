@@ -15,7 +15,4 @@ max_file_mb = 1000             # rotation of the HDF5 session files
 max_file_hours = 12
 max_queue_mb = 200             # images waiting to be written above this are dropped (counted), never queued
 compression = 4                # gzip level of the images (1 fast ... 9 small)
-
-[ui]
-refresh_hz = 2                 # status table refresh rate
-preview_hz = 1                 # preview image refresh rate (when the preview is on)
+# The display rates are in the extension: Settings > Station > Display rate.

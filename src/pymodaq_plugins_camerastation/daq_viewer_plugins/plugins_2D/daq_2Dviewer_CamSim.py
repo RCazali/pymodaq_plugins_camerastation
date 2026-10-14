@@ -19,7 +19,7 @@ class DAQ_2DViewer_CamSim(DAQ_Viewer_base):
         {'title': 'Scene:', 'name': 'scene', 'type': 'list', 'limits': ['beam', 'disk'], 'value': 'beam'},
         {'title': 'Width (px):', 'name': 'width', 'type': 'int', 'value': 640, 'min': 16, 'max': 4096},
         {'title': 'Height (px):', 'name': 'height', 'type': 'int', 'value': 480, 'min': 16, 'max': 4096},
-        {'title': 'Frame rate (Hz):', 'name': 'fps', 'type': 'float', 'value': 5.0, 'min': 0.1, 'max': 100.0},
+        {'title': 'Frame rate (Hz):', 'name': 'fps', 'type': 'float', 'value': 15.0, 'min': 0.1, 'max': 100.0},
         {'title': 'Noise (counts):', 'name': 'noise', 'type': 'float', 'value': 8.0, 'min': 0.0},
         {'title': 'Laser on:', 'name': 'laser_on', 'type': 'bool', 'value': True},
         {'title': 'Drift amplitude (px):', 'name': 'drift', 'type': 'float', 'value': 15.0, 'min': 0.0},

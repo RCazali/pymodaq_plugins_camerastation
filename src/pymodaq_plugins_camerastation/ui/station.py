@@ -15,7 +15,7 @@ import logging.handlers
 import math
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from qtpy import QtCore, QtWidgets
@@ -28,22 +28,25 @@ from ..core.engine import AnalysisEngine, STATE_TEXT, ST_NO_FRAMES, ST_OFF, ST_O
 from ..core.publisher import Publisher, flatten
 from ..core.recorder import H5StationWriter, IMG_EVENT, IMG_MANUAL, IMG_PERIODIC, reduce_image
 from ..core.scripts import ScriptLibrary, ScriptRunner
-from ..core.settings import CameraConfig, SettingsStore, StationConfig, clean_name
+from ..core.settings import CameraConfig, ProfileStore, SettingsStore, StationConfig, clean_name
 from ..core.triggers import TriggerWatcher
 from ..relay import bus
 from ..utils import config_get, machine_name, resolve_paths
+from .camera_panel import CameraPanel
 from .params import (NO_DETECTOR, SCRIPT_PREFIX, camera_scripts_children, camera_spec, script_param_spec,
-                     script_spec, station_spec)
+                     script_spec, station_spec, trend_plot_spec)
 from .preview import PreviewWidget
+from .trends import TrendsWidget, camera_specs, script_specs
 
 RELAY_PLUGIN = 'CameraStation'
 EXAMPLE_SCRIPTS = Path(__file__).resolve().parents[1] / 'resources' / 'scripts'
 STATION_KEYS = {'publish_hz', 'stale_s', 'trigger_folder', 'image_period_s', 'image_binning', 'image_bits',
-                'image_full_frame', 'burst_frames', 'preview', 'script_timeout_s'}
+                'image_full_frame', 'burst_frames', 'preview', 'script_timeout_s', 'display_hz', 'trends',
+                'trend_history_s'}
 SCRIPT_COLUMNS = ('Script', 'Camera', 'State', 'ms', 'Runs', 'Values')
 CAMERA_KEYS = {'name', 'detector', 'enabled', 'kind', 'rate_hz', 'binning', 'background', 'threshold',
                'min_signal', 'saturation', 'mask_cx', 'mask_cy', 'mask_radius', 'record_images'}
-COLUMNS = ('Camera', 'State', 'In Hz', 'Done Hz', 'ms', 'x', 'y', 'σx', 'σy', 'sum', 'sat %', 'Info')
+VALUE_NAMES = {'sx': 'σx', 'sy': 'σy', 'sat': 'sat%'}
 
 
 def plugin_name(det) -> str:
@@ -53,17 +56,23 @@ def plugin_name(det) -> str:
     return str(getattr(plugin, 'module_name', plugin) or '')
 
 
-def extract_2d(dte) -> Optional[np.ndarray]:
-    """First 2D array of a DataToExport, without copying."""
+def extract_2d(dte) -> Tuple[Optional[np.ndarray], Optional[float]]:
+    """First 2D array of a DataToExport, without copying, and its acquisition time (wall clock, set by
+    the plugin when it created the data; None when missing or implausible)."""
     if dte is None:
-        return None
+        return None, None
     for dwa in dte:
         dim = getattr(getattr(dwa, 'dim', None), 'name', str(getattr(dwa, 'dim', '')))
         if dim == 'Data2D':
             data = getattr(dwa, 'data', None)
             if data:
-                return data[0]
-    return None
+                try:
+                    ts = float(getattr(dwa, 'timestamp', math.nan))
+                except (TypeError, ValueError):
+                    ts = math.nan
+                plausible = math.isfinite(ts) and -60.0 < time.time() - ts < 60.0
+                return data[0], ts if plausible else None
+    return None, None
 
 
 def _fmt(v, nd=1) -> str:
@@ -146,8 +155,19 @@ class CameraStationApp(QtCore.QObject):
         self._closing = False
         self._building = False
         self.params: Optional[Parameter] = None
+        self.tree: Optional[ParameterTree] = None
         self.preview: Optional[PreviewWidget] = None
+        self.trends: Optional[TrendsWidget] = None
         self.docks: Dict[str, gutils.Dock] = {}
+        self.profiles = ProfileStore(self.paths['profiles'])
+        self.panels: Dict[str, CameraPanel] = {}
+        self._panels_open: set = set()                   # cam ids whose settings are shown
+        self._panels_box: Optional[QtWidgets.QVBoxLayout] = None
+        # results for the trends: (source, t_wall, values) appended by the worker threads
+        self._trend_in: 'collections.deque[tuple]' = collections.deque(maxlen=20000)
+        self._script_runs: Dict[str, int] = {}
+        self._trend_keys: Optional[list] = None
+        self._sized = False
 
         self.engine.set_cameras(self.station.cameras)
         for cam in self.station.cameras:
@@ -161,8 +181,7 @@ class CameraStationApp(QtCore.QObject):
             self.log.add(msg)
         for name in self.library.names():
             self.runner.params[name] = dict(self.station.script_setting(name)['params'])
-        self.engine.after_analysis = lambda rt, item, res: self.runner.submit(rt.cfg, rt.analyzer, item[0],
-                                                                              item[1], item[2], res)
+        self.engine.after_analysis = self._after_analysis
         self.runner.start()
         self.engine.start()
 
@@ -194,69 +213,69 @@ class CameraStationApp(QtCore.QObject):
 
     # ================================================================== UI construction
     def build(self, dockarea):
-        self.params = Parameter.create(name='settings', type='group', children=station_spec(self.station))
-        self._rebuild_cameras_group()
-        self.params.child('scripts', 'scripts_folder').setValue(str(self.paths['scripts']))
-        self._sync_scripts_tree()
-        self.params.sigTreeStateChanged.connect(self._tree_changed)
-        self.params.child('station', 'add_camera').sigActivated.connect(lambda: self.add_camera())
-        self.params.child('scripts', 'reload_scripts').sigActivated.connect(lambda: self._scan_scripts(force=True))
-        self.params.child('scripts', 'open_scripts_folder').sigActivated.connect(self._open_scripts_folder)
-
-        tree = ParameterTree()
-        tree.setParameters(self.params, showTop=False)
-        tree.setMinimumWidth(320)
+        self.tree = ParameterTree()
+        self.tree.setMinimumWidth(320)
         self.docks['settings'] = gutils.Dock('Settings')
-        self.docks['settings'].addWidget(tree)
+        self.docks['settings'].addWidget(self.tree)
         dockarea.addDock(self.docks['settings'], 'left')
 
-        status = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(status)
-        lay.setContentsMargins(2, 2, 2, 2)
-        self.table = QtWidgets.QTableWidget(0, len(COLUMNS))
-        self.table.setHorizontalHeaderLabels(COLUMNS)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        f = self.table.font()
-        f.setPointSize(f.pointSize() + 1)
-        self.table.setFont(f)
-        lay.addWidget(self.table, 2)
+        # cameras: the station status, then one compact panel per camera, like the modules of the dashboard
+        cams = QtWidgets.QWidget()
+        self._panels_box = QtWidgets.QVBoxLayout(cams)
+        self._panels_box.setContentsMargins(2, 2, 2, 2)
+        self._panels_box.setSpacing(4)
+        self.status_label = QtWidgets.QLabel()      # one line per item, no word wrap: a stable height
+        sf = self.status_label.font()
+        sf.setBold(True)
+        self.status_label.setFont(sf)
+        self.status_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        self.status_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self._panels_box.addWidget(self.status_label)
+        add = QtWidgets.QPushButton('＋ Add camera')
+        add.setToolTip('Add a camera of this dashboard to the station')
+        add.clicked.connect(lambda: self.add_camera())
+        self._panels_box.addWidget(add)
+        self._panels_box.addStretch(1)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(cams)
+        scroll.setMinimumWidth(420)
+        self.docks['cameras'] = gutils.Dock('Cameras')
+        self.docks['cameras'].addWidget(scroll)
+        dockarea.addDock(self.docks['cameras'], 'right', self.docks['settings'])
+
+        self.trends = TrendsWidget()
+        self.docks['trends'] = gutils.Dock('Trends')
+        self.docks['trends'].addWidget(self.trends)
+        dockarea.addDock(self.docks['trends'], 'right', self.docks['cameras'])
+
+        self.preview = PreviewWidget(self._roi_from_preview)
+        self.docks['preview'] = gutils.Dock('Preview')
+        self.docks['preview'].addWidget(self.preview)
+        dockarea.addDock(self.docks['preview'], 'above', self.docks['trends'])   # tabbed with the trends
+
         self.scripts_table = QtWidgets.QTableWidget(0, len(SCRIPT_COLUMNS))
         self.scripts_table.setHorizontalHeaderLabels(SCRIPT_COLUMNS)
         self.scripts_table.verticalHeader().setVisible(False)
         self.scripts_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.scripts_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
         self.scripts_table.horizontalHeader().setStretchLastSection(True)
-        self.scripts_table.setFont(f)
-        lay.addWidget(self.scripts_table, 1)
-        self.status_label = QtWidgets.QLabel()
-        sf = self.status_label.font()
-        sf.setPointSize(sf.pointSize() + 1)
-        sf.setBold(True)
-        self.status_label.setFont(sf)
-        self.status_label.setWordWrap(True)
-        lay.addWidget(self.status_label)
-        self.docks['status'] = gutils.Dock('Status')
-        self.docks['status'].addWidget(status)
-        dockarea.addDock(self.docks['status'], 'right', self.docks['settings'])
-
-        self.preview = PreviewWidget(self._roi_from_preview)
-        self.docks['preview'] = gutils.Dock('Preview')
-        self.docks['preview'].addWidget(self.preview)
-        dockarea.addDock(self.docks['preview'], 'bottom', self.docks['status'])
+        self.docks['scripts'] = gutils.Dock('Scripts')
+        self.docks['scripts'].addWidget(self.scripts_table)
+        dockarea.addDock(self.docks['scripts'], 'above', self.docks['trends'])
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
         self.docks['log'] = gutils.Dock('Log')
         self.docks['log'].addWidget(self.log_view)
-        dockarea.addDock(self.docks['log'], 'above', self.docks['preview'])   # tabbed with the preview
+        dockarea.addDock(self.docks['log'], 'above', self.docks['trends'])
+        self._raise('trends' if self.station.trends else 'log')
 
+        self._create_params()
         self.connect_cameras()
         self._apply_timers()
-        self.ui_timer.start(int(1000 / max(float(config_get(self.config, 'ui', 'refresh_hz', default=2)), 0.2)))
         self.trigger_timer.start(1500)
         self.scripts_timer.start(2000)
         self.log.add(f'Camera Station started on {self.machine}; settings {self.store.path}')
@@ -264,16 +283,53 @@ class CameraStationApp(QtCore.QObject):
             self.start_recording()
         self._refresh_ui()
 
+    def _create_params(self):
+        """(Re)creates the whole settings tree from ``self.station`` (start and profile loading)."""
+        self.params = Parameter.create(name='settings', type='group',
+                                       children=station_spec(self.station, self.profiles.names()))
+        self._rebuild_cameras_group()
+        self.params.child('scripts', 'scripts_folder').setValue(str(self.paths['scripts']))
+        self._sync_scripts_tree()
+        self._trend_keys = None
+        self._sync_trends()
+        self.params.sigTreeStateChanged.connect(self._tree_changed)
+        self.params.child('scripts', 'reload_scripts').sigActivated.connect(lambda: self._scan_scripts(force=True))
+        self.params.child('scripts', 'open_scripts_folder').sigActivated.connect(self._open_scripts_folder)
+        self.params.child('profiles', 'load_profile').sigActivated.connect(lambda: self.load_profile())
+        self.params.child('profiles', 'save_profile').sigActivated.connect(lambda: self.save_profile())
+        self.params.child('profiles', 'delete_profile').sigActivated.connect(lambda: self.delete_profile())
+        if self.tree is not None:
+            self.tree.setParameters(self.params, showTop=False)
+
+    def _initial_sizes(self):
+        """Once, when the window is shown: settings narrow, cameras medium, the plots get the rest (the
+        dock area splits evenly)."""
+        if self._sized or not self.docks['settings'].isVisible():
+            return
+        self._sized = True
+        try:
+            split = self.docks['settings'].container()
+            if isinstance(split, QtWidgets.QSplitter) and split.count() == 3:
+                total = sum(split.sizes())
+                split.setSizes([340, 540, max(total - 880, 400)])
+        except Exception:
+            pass
+
+    def _raise(self, dock: str):
+        if dock in self.docks:
+            try:
+                self.docks[dock].raiseDock()
+            except Exception:
+                pass
+
     def _apply_timers(self):
         self.publish_timer.start(max(int(1000 / self.station.publish_hz), 50))
+        period = max(int(1000 / self.station.display_hz), 50)
+        self.ui_timer.start(period)
+        if self.trends is not None:
+            self.trends.set_enabled(self.station.trends)
         if self.station.preview:
-            hz = max(float(config_get(self.config, 'ui', 'preview_hz', default=1)), 0.1)
-            self.preview_timer.start(int(1000 / hz))
-            if 'preview' in self.docks:
-                try:
-                    self.docks['preview'].raiseDock()       # tabbed with the log: bring it to the front
-                except Exception:
-                    pass
+            self.preview_timer.start(period)
         else:
             self.preview_timer.stop()
             if self.preview is not None:
@@ -350,34 +406,87 @@ class CameraStationApp(QtCore.QObject):
         self.connect_cameras()
         self.log.add('Dashboard modules reloaded')
 
+    def _start_viewer(self, det):
+        try:
+            if bool(getattr(det, 'grab_state', False)) or not getattr(det, 'initialized_state', True):
+                return                                   # DAQ_Viewer.grab() toggles: never stop a running one
+            if getattr(det, 'ui', None) is not None:
+                det.grab()                               # keeps the viewer's Grab button in sync
+            else:
+                det.grab_data(True)
+        except Exception as e:
+            self.log.add(f'{getattr(det, "title", "?")}: grab command failed: {e}', logging.WARNING)
+
+    def _stop_viewer(self, det):
+        try:
+            if bool(getattr(det, 'grab_state', False)):
+                det.stop_grab()
+        except Exception as e:
+            self.log.add(f'{getattr(det, "title", "?")}: stop command failed: {e}', logging.WARNING)
+
+    def _camera_viewer(self, cam_id: str):
+        link = self._links.get(cam_id)
+        if link is None:
+            cam = self.station.camera(cam_id)
+            self.log.add(f'{cam.name if cam else cam_id}: no camera viewer connected (Settings of the camera '
+                         f'> Camera)', logging.WARNING)
+            return None
+        return link[0]
+
     def grab_all(self, start: bool = True):
         """Starts (or stops) the grab of the camera viewers used by the station and of the relay."""
-        dets = [self._links[c][0] for c in self._links] + self.relay_viewers()
-        for det in dets:
+        for det in [self._links[c][0] for c in self._links] + self.relay_viewers():
+            if start:
+                self._start_viewer(det)
+            else:
+                self._stop_viewer(det)
+
+    def grab_camera(self, cam_id: str, start: bool = True):
+        """Continuous grab of one camera. Starting a camera also starts the relay (the bridge to A);
+        stopping one leaves the relay running (the other cameras, the heartbeat)."""
+        det = self._camera_viewer(cam_id)
+        if det is None:
+            return
+        if start:
+            self._start_viewer(det)
+            for relay in self.relay_viewers():
+                self._start_viewer(relay)
+        else:
+            self._stop_viewer(det)
+
+    def snap_camera(self, cam_id: str):
+        """One frame of this camera, analysed whatever the rate gate (a grabbing camera: its next frame)."""
+        det = self._camera_viewer(cam_id)
+        if det is None:
+            return
+        self.engine.force_next(cam_id)
+        if not bool(getattr(det, 'grab_state', False)):
             try:
-                grabbing = bool(getattr(det, 'grab_state', False))
-                if start:
-                    if grabbing or not getattr(det, 'initialized_state', True):
-                        continue                         # DAQ_Viewer.grab() toggles: never stop a running one
-                    if getattr(det, 'ui', None) is not None:
-                        det.grab()                       # keeps the viewer's Grab button in sync
-                    else:
-                        det.grab_data(True)
-                elif grabbing:
-                    det.stop_grab()
+                det.snap()
             except Exception as e:
-                self.log.add(f'{getattr(det, "title", "?")}: grab command failed: {e}', logging.WARNING)
+                self.log.add(f'{getattr(det, "title", "?")}: snap failed: {e}', logging.WARNING)
+        for relay in self.relay_viewers():
+            self._start_viewer(relay)
+
+    def preview_camera(self, cam_id: str):
+        if self.params is None:
+            return
+        self.params.child('station', 'preview_group', 'preview_camera').setValue(cam_id)
+        if not self.station.preview:
+            self.params.child('station', 'preview_group', 'preview').setValue(True)
+        self._raise('preview')
+        self._refresh_preview()
 
     # ================================================================== frames (GUI thread)
     def _on_frame(self, cam_id: str, dte):
         if self._closing:
             return
         try:
-            img = extract_2d(dte)
+            img, t_acq = extract_2d(dte)
             if img is None:
                 self.log.add(f'{cam_id}: the viewer sends no 2D data', logging.WARNING)
                 return
-            accepted = self.engine.submit(cam_id, img)
+            accepted = self.engine.submit(cam_id, img, t_wall=t_acq, acquired=t_acq is not None)
             burst = self._bursts.get(cam_id)
             if burst and accepted:
                 cam = self.station.camera(cam_id)
@@ -388,6 +497,12 @@ class CameraStationApp(QtCore.QObject):
                     del self._bursts[cam_id]
         except Exception as e:
             self.log.add(f'{cam_id}: frame not processed: {e}', logging.ERROR)
+
+    def _after_analysis(self, rt, item, res):
+        """Worker thread, after each built-in analysis: every result goes to the trends (deque: thread
+        safe, bounded), then the user scripts of the camera run on the same frame."""
+        self._trend_in.append((rt.cfg.name, item[2], res))
+        self.runner.submit(rt.cfg, rt.analyzer, item[0], item[1], item[2], res)
 
     # ================================================================== publication (timer)
     def _publish(self):
@@ -637,6 +752,83 @@ class CameraStationApp(QtCore.QObject):
             pc.setValue(cur if cur in ids else ids[0])
         finally:
             self._building = False
+        self._rebuild_panels()
+
+    def _rebuild_panels(self):
+        """One panel per camera, on the camera group of the settings (rebuilt with it)."""
+        if self._panels_box is None:
+            return
+        for panel in self.panels.values():
+            self._panels_box.removeWidget(panel)
+            panel.setParent(None)
+            panel.deleteLater()
+        self.panels.clear()
+        for i, cam in enumerate(self.station.cameras):
+            panel = CameraPanel(self.params.child('cameras', cam.id), settings_open=cam.id in self._panels_open)
+            cid = cam.id
+            panel.snap_clicked.connect(lambda cid=cid: self.snap_camera(cid))
+            panel.grab_toggled.connect(lambda on, cid=cid: self.grab_camera(cid, on))
+            panel.stop_clicked.connect(lambda cid=cid: self.grab_camera(cid, False))
+            panel.preview_clicked.connect(lambda cid=cid: self.preview_camera(cid))
+            panel.settings_toggled.connect(lambda on, cid=cid: self._panel_settings_shown(cid, on))
+            self._panels_box.insertWidget(1 + i, panel)          # after the station status line
+            self.panels[cam.id] = panel
+        self._refresh_panels()
+
+    def _panel_settings_shown(self, cam_id: str, shown: bool):
+        if shown:
+            self._panels_open.add(cam_id)
+        else:
+            self._panels_open.discard(cam_id)
+
+    # ================================================================== trends
+    def _trend_specs(self):
+        specs = []
+        for cam in self.station.cameras:
+            if cam.enabled:
+                specs += camera_specs(cam.name, cam.labels())
+        for pub, labels, _, _ in self._script_entries():
+            specs += script_specs(pub, labels)
+        return specs
+
+    def _sync_trends(self):
+        """Plot list of the settings and plots of the Trends dock, when the cameras / scripts changed."""
+        if self.params is None:
+            return
+        specs = self._trend_specs()
+        keys = [s.key for s in specs]
+        if keys != self._trend_keys:
+            self._trend_keys = keys
+            self._building = True
+            try:
+                group = self.params.child('trends_group', 'plots')
+                group.clearChildren()
+                for s in specs:
+                    group.addChild(trend_plot_spec(s.key, s.title, self._trend_shown(s)))
+            finally:
+                self._building = False
+        if self.trends is not None:
+            self.trends.set_plots([s for s in specs if self._trend_shown(s)])
+
+    def _trend_shown(self, spec) -> bool:
+        return self.station.trend_choices.get(spec.key, spec.default)
+
+    def _refresh_trends(self):
+        n = len(self._trend_in)
+        for _ in range(n):
+            source, t, res = self._trend_in.popleft()
+            if self.trends is not None:
+                self.trends.add(source, t, res)
+        for pub, _, snap, _ in self._script_entries():
+            runs = snap.get('runs', 0)
+            if snap and runs != self._script_runs.get(pub) and self.trends is not None:
+                self._script_runs[pub] = runs
+                self.trends.add(pub, snap.get('t_wall', time.time()), snap.get('result', {}))
+        self._sync_trends()
+        if self.trends is not None and self.station.trends:
+            dock = self.docks.get('trends')
+            if dock is None or dock.isVisible():
+                self.trends.redraw(self.station.trend_history_s)
 
     def _wire_camera_actions(self, p: Parameter, cam_id: str):
         p.child('remove').sigActivated.connect(lambda: self.remove_camera(cam_id))
@@ -698,12 +890,21 @@ class CameraStationApp(QtCore.QObject):
                     cam.scripts.remove(name)
                 self._settings_changed()
             return
+        if cam_id is None and param.parent() is not None and param.parent().name() == 'plots':
+            st.trend_choices[param.opts.get('trend_key', '')] = bool(value)   # a trend plot ticked / unticked
+            self._sync_trends()
+            self._settings_changed()
+            return
         if cam_id is None:
             if name in STATION_KEYS:
                 setattr(st, name, value)
                 st.validate()
-                if name in ('publish_hz', 'preview'):
+                if name in ('publish_hz', 'preview', 'display_hz', 'trends'):
                     self._apply_timers()
+                if name == 'preview' and value:
+                    self._raise('preview')
+                if name == 'trends':
+                    self._raise('trends' if value else 'log')
                 if name == 'trigger_folder':
                     self.watcher = TriggerWatcher(st.trigger_folder)
                     self.log.add(f'Trigger folder: {st.trigger_folder or "off"}')
@@ -831,6 +1032,93 @@ class CameraStationApp(QtCore.QObject):
         if self.station.camera(cam_id) is not None:
             self.set_roi(cam_id, roi)
 
+    # ================================================================== settings profiles
+    def _selected_profile(self) -> str:
+        return str(self.params.child('profiles', 'profile').value() or '') if self.params else ''
+
+    def _update_profile_list(self, select: str = ''):
+        p = self.params.child('profiles', 'profile')
+        names = self.profiles.names()
+        self._building = True
+        try:
+            p.setLimits(names or [''])
+            p.setValue(select if select in names else (names[0] if names else ''))
+        finally:
+            self._building = False
+
+    def save_profile(self, name: str = '') -> bool:
+        """Saves the current settings as a profile (``name`` or the 'New name' field, else the selected one)."""
+        if not name and self.params is not None:
+            name = str(self.params.child('profiles', 'profile_name').value() or '').strip() or \
+                self._selected_profile()
+        if not name:
+            self.log.add('Profile not saved: type a name in Profiles > New name', logging.WARNING)
+            return False
+        if self.window is not None and self.profiles.path(name).exists() and \
+                not self._confirm(f'Overwrite the profile "{name}"?'):
+            return False
+        try:
+            saved = self.profiles.save(name, self.station)
+        except Exception as e:
+            self.log.add(f'profile "{name}" not saved: {e}', logging.ERROR)
+            return False
+        if self.params is not None:
+            self._set_quiet(self.params.child('profiles', 'profile_name'), '')
+            self._update_profile_list(saved)
+        self.log.add(f'Profile "{saved}" saved')
+        return True
+
+    def load_profile(self, name: str = '') -> bool:
+        """Replaces the current settings by a profile (the cameras, scripts and display are rebuilt)."""
+        name = name or self._selected_profile()
+        if not name:
+            self.log.add('No profile to load: save one first', logging.WARNING)
+            return False
+        if self.window is not None and not self._confirm(
+                f'Load the profile "{name}"? The current settings are replaced (save them as a profile '
+                f'first to keep them).'):
+            return False
+        st, err = self.profiles.load(name)
+        if st is None:
+            self.log.add(err, logging.ERROR)
+            return False
+        old_names = {c.name for c in self.station.cameras}
+        self._apply_station(st)
+        self.log.add(f'Profile "{name}" loaded')
+        if {c.name for c in st.cameras} != old_names:
+            self.log.add('The camera names changed: the keys received by computer A change, update its roles',
+                         logging.WARNING)
+        if self.writer is not None:
+            self.writer.write_event(time.time(), 'settings', f'profile {name} loaded')
+        self._update_profile_list(name)
+        return True
+
+    def delete_profile(self, name: str = '') -> bool:
+        name = name or self._selected_profile()
+        if not name:
+            return False
+        if self.window is not None and not self._confirm(f'Delete the profile "{name}"?'):
+            return False
+        ok = self.profiles.delete(name)
+        self.log.add(f'Profile "{name}" deleted' if ok else f'Profile "{name}" not deleted',
+                     logging.INFO if ok else logging.WARNING)
+        self._update_profile_list()
+        return ok
+
+    def _apply_station(self, st: StationConfig):
+        self.station = st
+        self._bursts.clear()
+        self.engine.set_cameras(st.cameras)
+        for cam in st.cameras:
+            self._load_images(cam)
+        for name in self.library.names():
+            self.runner.params[name] = dict(st.script_setting(name)['params'])
+        self.watcher = TriggerWatcher(st.trigger_folder)
+        self._create_params()
+        self.connect_cameras()
+        self._apply_timers()
+        self._settings_changed()
+
     # ================================================================== reference / dark frames
     def _image_path(self, name: str) -> Path:
         return self.paths['references'] / name
@@ -841,13 +1129,12 @@ class CameraStationApp(QtCore.QObject):
         if rt is None:
             return
         for what, fname in (('ref', cam.reference_file), ('dark', cam.dark_file)):
-            if not fname:
-                continue
-            try:
-                arr = np.load(self._image_path(fname), allow_pickle=False)
-            except Exception as e:
-                self.log.add(f'{cam.name}: {what} image {fname} not loaded: {e}', logging.WARNING)
-                continue
+            arr = None
+            if fname:
+                try:
+                    arr = np.load(self._image_path(fname), allow_pickle=False)
+                except Exception as e:
+                    self.log.add(f'{cam.name}: {what} image {fname} not loaded: {e}', logging.WARNING)
             if what == 'ref':
                 rt.analyzer.set_reference(arr)
             else:
@@ -925,37 +1212,46 @@ class CameraStationApp(QtCore.QObject):
         try:
             for line in self.log.take_new():
                 self.log_view.appendPlainText(line)
-            cams = self.station.cameras
-            if self.table.rowCount() != len(cams):
-                self.table.setRowCount(len(cams))
-            for row, cam in enumerate(cams):
-                snap = self.engine.snapshot(cam.id)
-                state = self.engine.state(cam.id, self.station.stale_s)
-                res = snap.get('result', {})
-                info = snap.get('error') or snap.get('reason') or ''
-                if not cam.detector:
-                    info = 'no camera viewer selected'
-                elif cam.id not in self._links:
-                    info = f'viewer "{cam.detector}" not found'
-                vals = (cam.name, STATE_TEXT.get(state, state), _fmt(snap.get('in_rate')), _fmt(snap.get('done_rate')),
-                        _fmt(snap.get('calc_ms')), _fmt(res.get('x')), _fmt(res.get('y')), _fmt(res.get('sx')),
-                        _fmt(res.get('sy')), _fmt(res.get('sum'), 0), _fmt(100 * res.get('sat', math.nan), 2), info)
-                for col, text in enumerate(vals):
-                    item = self.table.item(row, col)
-                    if item is None:
-                        item = QtWidgets.QTableWidgetItem()
-                        self.table.setItem(row, col, item)
-                    if item.text() != text:
-                        item.setText(text)
-                        item.setToolTip(text)
-                    if col == 1:
-                        f = item.font()
-                        f.setBold(state != ST_OK)
-                        item.setFont(f)
+            self._initial_sizes()
+            self._refresh_panels()
             self._refresh_scripts_table()
-            self.status_label.setText(self._status_text())
+            text = self._status_text()
+            if self.status_label.text() != text:
+                self.status_label.setText(text)
+                self.status_label.setToolTip(text)
         except Exception as e:
             self.log.add(f'status refresh: {e}', logging.ERROR)
+        try:
+            self._refresh_trends()
+        except Exception as e:
+            self.log.add(f'trends: {e}', logging.ERROR)
+
+    def _refresh_panels(self):
+        for cam in self.station.cameras:
+            panel = self.panels.get(cam.id)
+            if panel is None:
+                continue
+            snap = self.engine.snapshot(cam.id)
+            state = self.engine.state(cam.id, self.station.stale_s)
+            res = snap.get('result', {})
+            info = snap.get('error') or snap.get('reason') or ''
+            det = self._links.get(cam.id, (None,))[0]
+            if not cam.detector:
+                info = 'no camera viewer selected (⚙ > Camera)'
+            elif det is None:
+                info = f'viewer "{cam.detector}" not found in the dashboard'
+            elif not cam.enabled:
+                info = 'analysis disabled (⚙ > Enabled)'
+            grabbing = None if det is None else bool(getattr(det, 'grab_state', False))
+            if grabbing is False and state != ST_OK and not info:
+                info = 'camera stopped: Grab (green triangle) or Snap (one frame)'
+            rates = (f'camera {_fmt(snap.get("in_rate"))} Hz → analysed {_fmt(snap.get("done_rate"))} Hz '
+                     f'(max {cam.rate_hz:g}) · {_fmt(snap.get("calc_ms"))} ms')
+            values = '  '.join(f'{VALUE_NAMES.get(lab, lab)} '
+                               f'{_fmt(100 * res.get(lab, math.nan), 2) if lab == "sat" else _fmt(res.get(lab), 1)}'
+                               for lab in cam.labels() if lab != 'valid')
+            panel.update_view(f'{cam.name}  ({cam.detector or "no camera"})', STATE_TEXT.get(state, state),
+                              state == ST_OK, grabbing, rates, values, info)
 
     def _refresh_scripts_table(self):
         rows = []
@@ -1023,7 +1319,7 @@ class CameraStationApp(QtCore.QObject):
         cpu = self._cpu_load()
         if cpu:
             parts.append(cpu)
-        return '   |   '.join(parts)
+        return '\n'.join(parts)          # one line per item: no word wrap, the height never depends on the width
 
     def _refresh_preview(self):
         if self._closing or self.preview is None or not self.station.preview:

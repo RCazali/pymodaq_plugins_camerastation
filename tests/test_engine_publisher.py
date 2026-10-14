@@ -49,6 +49,41 @@ def test_rate_gate_drops_extra_frames_without_work():
     assert eng.cameras['cam1'].frames_done == accepted
 
 
+@pytest.mark.parametrize('fps', [5.0, 8.0, 10.0, 12.4, 15.0, 18.0, 30.0])
+@pytest.mark.parametrize('acquired', [True, False])
+def test_rate_gate_reaches_the_set_rate(fps, acquired):
+    """10 Hz gate, 10 s. A minimum interval would give fps / 2 for a 15 Hz camera (7.5 Hz). With the
+    acquisition time, frames delivered in bursts by a busy GUI thread keep every frame of a slower
+    camera and the set rate of a faster one; never more than the set rate."""
+    eng, clock, cam = make(rate=10.0)
+    img = np.zeros((8, 8))
+    rng = np.random.default_rng(0)
+    n = int(10 * fps)
+    t_acq = 1.7e9 + (np.arange(n) + rng.uniform(-0.1, 0.1, n)) / fps
+    delivery = np.maximum.accumulate(t_acq + rng.exponential(0.06, n))    # late, sometimes in bursts
+    accepted = 0
+    for ta, td in zip(t_acq, delivery):
+        clock.t = td
+        accepted += eng.submit('cam1', img, t_wall=float(ta), acquired=acquired)
+        eng._pending.clear()
+    expected = min(fps, 10.0) * 10
+    assert accepted <= 10 * 10 + 2
+    if acquired:
+        assert accepted >= 0.97 * expected
+    else:
+        assert accepted >= 0.75 * expected       # arrival times only: bursts cost frames, bounded
+
+
+def test_snap_is_analysed_whatever_the_gate():
+    eng, clock, cam = make(rate=1.0)
+    img = np.zeros((8, 8))
+    assert eng.submit('cam1', img)
+    assert not eng.submit('cam1', img)      # same instant: gated
+    eng.force_next('cam1')
+    assert eng.submit('cam1', img)          # snap
+    assert not eng.submit('cam1', img)
+
+
 def test_latest_wins_when_the_worker_is_late():
     eng, clock, cam = make(rate=10.0)
     for i in range(5):

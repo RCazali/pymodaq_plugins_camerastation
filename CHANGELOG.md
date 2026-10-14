@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.0 — 2026-10-14
+
+- **One panel per camera**, like a dashboard viewer: Snap (one frame, analysed whatever the gate), Grab
+  (continuous; starts the relay too), Stop, Preview, ⚙ settings of the camera; camera rate → analysed
+  rate, calc time, results, and why there is no value. Replaces the status table. *Grab all / Stop all*
+  stay in the toolbar.
+- **Trends dock**: one plot per quantity with its own scale (the dashboard 0D viewer put a `sum` of 1e6
+  and a centroid of 320 px on one axis), every result plotted; on / off, history, plots to show.
+- **Settings profiles** (save / load / delete the whole station settings).
+- **Rate gate fixed**: a minimum interval analysed a 15 Hz camera at 7.5 Hz with a 10 Hz gate, and
+  frames delivered in bursts by a busy GUI were dropped even from a slower camera. Now a token bucket
+  timed with the acquisition time of the frame (DataWithAxes timestamp): the set rate is reached.
+  Results carry the acquisition time.
+- **Display rate** setting (default 5 Hz) for panels, preview and trends (was 2 Hz / 1 Hz, `[ui]` of
+  the config file, now unused).
+- PyMoDAQ 5.3: the extension toolbar keeps *Show dashboard* only (no experiment / state managers, which
+  act on the dashboard).
+- `CamSim` default frame rate 15 Hz (was 5 Hz: the office simulator could not exceed 5 analyses/s).
+- `tools/resize_watch.py`: names the widget that keeps resizing (display that keeps moving after a dock
+  edge was dragged, seen on PyMoDAQ 5.3 without the extension).
+
 ## 0.2.1 — 2026-10-11
 
 - **Fix: noise alone was published as a valid measurement** (beam and disk analyses). With the laser

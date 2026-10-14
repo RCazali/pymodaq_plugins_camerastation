@@ -9,14 +9,30 @@ from ..core.settings import CameraConfig, StationConfig
 NO_DETECTOR = '(none)'
 
 
-def station_spec(st: StationConfig) -> List[dict]:
+def station_spec(st: StationConfig, profiles: List[str] = ()) -> List[dict]:
+    profiles = list(profiles)
     return [
+        {'title': 'Profiles', 'name': 'profiles', 'type': 'group', 'children': [
+            {'title': 'Profile:', 'name': 'profile', 'type': 'list', 'limits': profiles or [''],
+             'value': profiles[0] if profiles else '',
+             'tip': 'Saved copies of all the settings of the station (cameras, scripts, display...).'},
+            {'title': 'Load profile', 'name': 'load_profile', 'type': 'action',
+             'tip': 'Replace the current settings by the selected profile.'},
+            {'title': 'Delete profile', 'name': 'delete_profile', 'type': 'action'},
+            {'title': 'New name:', 'name': 'profile_name', 'type': 'str', 'value': '',
+             'tip': 'Name of the profile to save (empty = overwrite the selected one).'},
+            {'title': 'Save current settings', 'name': 'save_profile', 'type': 'action'},
+        ]},
         {'title': 'Station', 'name': 'station', 'type': 'group', 'children': [
             {'title': 'Publish rate (Hz):', 'name': 'publish_hz', 'type': 'float', 'value': st.publish_hz,
              'min': 0.1, 'max': 20.0,
              'tip': '0D values sent to computer A (and logged) per second. 1-2 Hz is plenty for drifts.'},
             {'title': 'Stale after (s):', 'name': 'stale_s', 'type': 'float', 'value': st.stale_s, 'min': 0.5,
              'tip': 'A camera without a new result for this long publishes NaN and valid = 0.'},
+            {'title': 'Display rate (Hz):', 'name': 'display_hz', 'type': 'float', 'value': st.display_hz,
+             'min': 0.5, 'max': 20.0,
+             'tip': 'Refresh of the camera panels, preview and trends. Display only: the analysis rate is '
+                    'set per camera (Max rate) and every result is recorded and plotted.'},
             {'title': 'Trigger folder (from A):', 'name': 'trigger_folder', 'type': 'str',
              'value': st.trigger_folder,
              'tip': 'Folder shared with computer A where Laser Control writes its event files (O8). '
@@ -37,7 +53,7 @@ def station_spec(st: StationConfig) -> List[dict]:
             ]},
             {'title': 'Preview', 'name': 'preview_group', 'type': 'group', 'children': [
                 {'title': 'Show preview:', 'name': 'preview', 'type': 'bool', 'value': st.preview,
-                 'tip': 'Small live image with the analysis overlay (1 Hz). Off = no display cost.'},
+                 'tip': 'Live image with the analysis overlay (at the display rate). Off = no display cost.'},
                 {'title': 'Camera:', 'name': 'preview_camera', 'type': 'list',
                  'limits': [c.id for c in st.cameras] or [''], 'value': st.cameras[0].id if st.cameras else ''},
                 {'title': 'Show:', 'name': 'preview_view', 'type': 'list',
@@ -46,7 +62,14 @@ def station_spec(st: StationConfig) -> List[dict]:
                                           '(depletion for a disk camera). "script output": the last '
                                           'array given to ctx.show() by a script of this camera.'},
             ]},
-            {'title': 'Add camera', 'name': 'add_camera', 'type': 'action'},
+        ]},
+        {'title': 'Trends', 'name': 'trends_group', 'type': 'group', 'children': [
+            {'title': 'Show trends:', 'name': 'trends', 'type': 'bool', 'value': st.trends,
+             'tip': 'Plots of every result in the Trends dock. Off = no display cost.'},
+            {'title': 'History (s):', 'name': 'trend_history_s', 'type': 'float', 'value': st.trend_history_s,
+             'min': 10.0, 'max': 7200.0},
+            {'title': 'Plots', 'name': 'plots', 'type': 'group', 'children': [],
+             'tip': 'One plot per quantity, each with its own scale.'},
         ]},
         {'title': 'Scripts (test analyses live)', 'name': 'scripts', 'type': 'group', 'children': [
             {'title': 'Folder:', 'name': 'scripts_folder', 'type': 'str', 'value': '', 'readonly': True,
@@ -56,8 +79,14 @@ def station_spec(st: StationConfig) -> List[dict]:
             {'title': 'Timeout (s):', 'name': 'script_timeout_s', 'type': 'float', 'value': st.script_timeout_s,
              'min': 1.0, 'tip': 'A script running longer is disabled until its file is saved again.'},
         ]},
-        {'title': 'Cameras', 'name': 'cameras', 'type': 'group', 'children': [camera_spec(c, []) for c in st.cameras]},
+        # shown in the camera panels (one tree per camera), not in the station tree
+        {'title': 'Cameras', 'name': 'cameras', 'type': 'group', 'visible': False,
+         'children': [camera_spec(c, []) for c in st.cameras]},
     ]
+
+
+def trend_plot_spec(key: str, title: str, shown: bool) -> dict:
+    return {'title': title, 'name': key.replace('/', '__'), 'type': 'bool', 'value': shown, 'trend_key': key}
 
 
 SCRIPT_PREFIX = 'script__'
