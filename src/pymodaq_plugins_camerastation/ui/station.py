@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import collections
 import datetime as _dt
+import inspect
 import logging
 import logging.handlers
 import math
@@ -145,6 +146,7 @@ class CameraStationApp(QtCore.QObject):
         self.engine = AnalysisEngine()
         self.engine.on_error = lambda cid, msg: self.log.add(f'{cid}: analysis error: {msg}', logging.ERROR)
         self.publisher = Publisher()
+        self._relay_wanted = False          # the relay must grab (and forward to LECO): see _keep_relay
         self.writer: Optional[H5StationWriter] = None
         self.watcher = TriggerWatcher(self.station.trigger_folder)
         self._links: Dict[str, tuple] = {}               # cam id -> (viewer, slot)
@@ -417,6 +419,54 @@ class CameraStationApp(QtCore.QObject):
         except Exception as e:
             self.log.add(f'{getattr(det, "title", "?")}: grab command failed: {e}', logging.WARNING)
 
+    @staticmethod
+    def _leco_keyword(det) -> str:
+        """Name of the 'forward the data to LECO' argument of DAQ_Viewer.grab: send_to_leco (5.3),
+        send_to_tcpip (5.1); '' if none"""
+        try:
+            params = inspect.signature(det.grab_data).parameters
+        except (TypeError, ValueError):
+            return ''
+        return next((k for k in ('send_to_leco', 'send_to_tcpip') if k in params), '')
+
+    def _relay_forwards(self, det) -> bool:
+        key = self._leco_keyword(det)
+        return not key or bool(getattr(det, f'_{key}', True))
+
+    def _start_relay(self, det):
+        """Grab of the relay with its data forwarded to LECO: computer A receives the values whoever started
+        the grab. A plain DAQ_Viewer grab (started from this station or the dashboard Grab button) never
+        sends anything to LECO, and a Grab sent by computer A toggles a running grab off: so the relay is
+        (re)started here with forwarding on, and kept running by the UI timer (_keep_relay)."""
+        self._relay_wanted = True
+        try:
+            if not getattr(det, 'initialized_state', True):
+                return
+            grabbing = bool(getattr(det, 'grab_state', False))
+            if grabbing and self._relay_forwards(det):
+                return
+            if grabbing:
+                det.stop_grab()                          # running without forwarding: restarted with it
+            key = self._leco_keyword(det)
+            kwargs = {key: True} if key else {}
+            if getattr(det, 'ui', None) is not None:
+                det.grab(**kwargs)                       # keeps the viewer's Grab button in sync
+            else:
+                det.grab_data(True, **kwargs)
+        except Exception as e:
+            self.log.add(f'{getattr(det, "title", "?")}: relay grab failed: {e}', logging.WARNING)
+
+    def _keep_relay(self):
+        """The relay stopped while the station publishes (e.g. a Grab of computer A toggled it off, or it was
+        started without LECO forwarding, e.g. by the Grab button of the dashboard): restart it"""
+        for det in self.relay_viewers():
+            if not getattr(det, 'initialized_state', True):
+                continue
+            grabbing = bool(getattr(det, 'grab_state', False))
+            if (grabbing and not self._relay_forwards(det)) or (not grabbing and self._relay_wanted):
+                self.log.add(f'{getattr(det, "title", "relay")}: relay (re)started with LECO forwarding')
+                self._start_relay(det)
+
     def _stop_viewer(self, det):
         try:
             if bool(getattr(det, 'grab_state', False)):
@@ -435,9 +485,16 @@ class CameraStationApp(QtCore.QObject):
 
     def grab_all(self, start: bool = True):
         """Starts (or stops) the grab of the camera viewers used by the station and of the relay."""
-        for det in [self._links[c][0] for c in self._links] + self.relay_viewers():
+        if not start:
+            self._relay_wanted = False
+        for det in [self._links[c][0] for c in self._links]:
             if start:
                 self._start_viewer(det)
+            else:
+                self._stop_viewer(det)
+        for det in self.relay_viewers():
+            if start:
+                self._start_relay(det)
             else:
                 self._stop_viewer(det)
 
@@ -450,7 +507,7 @@ class CameraStationApp(QtCore.QObject):
         if start:
             self._start_viewer(det)
             for relay in self.relay_viewers():
-                self._start_viewer(relay)
+                self._start_relay(relay)
         else:
             self._stop_viewer(det)
 
@@ -466,7 +523,7 @@ class CameraStationApp(QtCore.QObject):
             except Exception as e:
                 self.log.add(f'{getattr(det, "title", "?")}: snap failed: {e}', logging.WARNING)
         for relay in self.relay_viewers():
-            self._start_viewer(relay)
+            self._start_relay(relay)
 
     def preview_camera(self, cam_id: str):
         if self.params is None:
@@ -1210,6 +1267,7 @@ class CameraStationApp(QtCore.QObject):
         if self._closing or self.params is None:
             return
         try:
+            self._keep_relay()
             for line in self.log.take_new():
                 self.log_view.appendPlainText(line)
             self._initial_sizes()

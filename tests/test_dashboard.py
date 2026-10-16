@@ -91,6 +91,15 @@ def test_dashboard_runs_the_station(loaded):
     assert wait(lambda: st.publisher.counter > 3, 10)
     relay = st.relay_viewers()[0]
     assert relay.grab_state
+    # the relay forwards its data to LECO (computer A), whoever toggles it
+    key = st._leco_keyword(relay)
+    assert key and st._relay_forwards(relay)
+    relay.grab(**{key: True})                    # a Grab of computer A: DAQ_Viewer toggles the running grab off
+    assert not relay.grab_state
+    assert wait(lambda: relay.grab_state and st._relay_forwards(relay), 5)        # restarted by the station
+    relay.stop_grab()
+    relay.grab()                                 # the dashboard Grab button: no LECO forwarding
+    assert wait(lambda: relay.grab_state and st._relay_forwards(relay), 5)
     t0 = time.time()
     st.toggle_recording(True)
     assert wait(lambda: st.writer is not None and st.writer.n_rows > 0, 10)

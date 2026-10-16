@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 — 2026-10-16
+
+- **Fix: nothing reached computer A through LECO.** PyMoDAQ forwards a viewer's data to LECO only when its
+  grab is started "for LECO"; the station started the relay with a plain grab, so A received nothing. And a
+  Grab sent by A (Laser Control starting its viewers) toggled the running relay *off*. The station now starts
+  the relay with LECO forwarding and restarts it (log: "relay (re)started with LECO forwarding") when it was
+  stopped by A or started from the dashboard Grab button. Checked end to end with a LECO coordinator, PyMoDAQ
+  5.1.10 and 5.3.
+
 ## 0.3.0 — 2026-10-14
 
 - **One panel per camera**, like a dashboard viewer: Snap (one frame, analysed whatever the gate), Grab
