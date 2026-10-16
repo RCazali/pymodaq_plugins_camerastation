@@ -6,7 +6,7 @@ h5exporters = false
 scanners = false
 
 [urls]
-package-url = 'https://github.com/your-group/pymodaq_plugins_camerastation'  # adapt to your repository
+package-url = 'https://github.com/RCazali/pymodaq_plugins_camerastation'
 
 [project]
 name = "pymodaq_plugins_camerastation"
