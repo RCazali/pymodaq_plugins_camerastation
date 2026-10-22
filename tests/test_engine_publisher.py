@@ -192,6 +192,16 @@ def test_channel_keys_seen_by_laser_control():
     assert keys['LECO_B/Stats/frame_counter'] == 7.0
 
 
+def test_groups_too_wide_for_a_5_1_viewer_are_not_plotted_whatever_the_local_version():
+    """A station on PyMoDAQ 5.3 feeds a viewer of computer A that may run 5.1 (6-7 pens, IndexError beyond)."""
+    pytest.importorskip('pymodaq_data')
+    from pymodaq_plugins_camerastation.relay import MAX_PLOTTED_CHANNELS, payload_to_dte
+    assert MAX_PLOTTED_CHANNELS is not None and MAX_PLOTTED_CHANNELS <= 6
+    dte = payload_to_dte({'Cam1': {k: 1.0 for k in 'abcdefghij'}, STATS: {'frame_counter': 1.0, 't_wall': 0.0}})
+    plot = {dwa.name: getattr(dwa, 'do_plot', True) for dwa in dte}
+    assert plot == {'Cam1': False, STATS: True}
+
+
 def test_settings_roundtrip_validation_and_corrupt_file(tmp_path):
     st = StationConfig(publish_hz=1000, cameras=[CameraConfig(id='c', name='Disk cam/1', roi=[1, 2]),
                                                   CameraConfig(id='c', name='Stats', kind='nope')])

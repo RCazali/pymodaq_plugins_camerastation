@@ -51,6 +51,13 @@ BACKGROUNDS = ('none', 'border', 'dark')
 # about 4 over a few thousand blocks; a spot of the size of a block is seen from ~1 sigma per pixel.
 NOISE_BLOCK = 8
 NOISE_FACTOR = 6.0
+# A real camera without beam is not white noise: vignetting (a dome) or bands of the sensor vary the block
+# means 4 to 8 times more than the pixel noise says (an 8-bit sensor at 5 counts even gives a pixel noise of
+# ~0, see computer B, 2026-10-22). The brightest block must also stand out of the spread of the background
+# blocks (robust sigma of the blocks below half the contrast) by NOISE_FACTOR. In a small ROI / mask
+# (fewer than SMALL_ROI_BLOCKS blocks) the spot covers most blocks and leaves no background to measure, while a
+# dome or bands hardly vary over it: there the pixel noise test alone applies, as before.
+SMALL_ROI_BLOCKS = 100
 
 
 def nan_result(kind: str) -> Dict[str, float]:
@@ -230,8 +237,10 @@ class CameraAnalyzer:
         self._mask_cache = (key, m)
         return m
 
-    def _contrast(self, wgt: np.ndarray, mask: Optional[np.ndarray], n: int) -> float:
-        """Highest block mean above the median block (blocks inside the mask): a local signal.
+    def _contrast(self, wgt: np.ndarray, mask: Optional[np.ndarray], n: int) -> Tuple[float, float, int]:
+        """(contrast, background spread, number of blocks). Contrast: highest block mean above the median block
+        (blocks inside the mask), a local signal. Spread: robust sigma (1.4826 MAD) of the blocks below half the
+        contrast, i.e. without the spot; inf when fewer than 8 such blocks.
 
         The median removes a uniform offset. A fluorescence that changed since the reference keeps
         the shape of the disk, so it still gives a contrast: that case is for ``min_signal``."""
@@ -244,8 +253,12 @@ class CameraAnalyzer:
                 self._inside_cache = (key, inside if inside.any() else cover > 0)
             blocks = blocks[self._inside_cache[1]]
         if blocks.size == 0:
-            return 0.0
-        return float(blocks.max()) - float(np.median(blocks))
+            return 0.0, math.inf, 0
+        med = float(np.median(blocks))
+        contrast = float(blocks.max()) - med
+        rest = blocks[blocks <= med + 0.5 * contrast]
+        spread = 1.4826 * float(np.median(np.abs(rest - np.median(rest)))) if rest.size >= 8 else math.inf
+        return contrast, spread, int(blocks.size)
 
     # ------------------------------------------------------------------ analysis
     def analyze(self, image) -> Dict[str, float]:
@@ -309,7 +322,9 @@ class CameraAnalyzer:
         # Without this test an image of noise alone (laser off) gives a "valid" centroid in the
         # middle of the ROI: its positive half survives the threshold below.
         n = max(1, min(NOISE_BLOCK, min(wgt.shape) // 4))
-        found = self._contrast(wgt, mask, n) >= NOISE_FACTOR * noise / n
+        contrast, spread, n_blocks = self._contrast(wgt, mask, n)
+        found = contrast >= NOISE_FACTOR * noise / n and (
+            n_blocks < SMALL_ROI_BLOCKS or contrast >= NOISE_FACTOR * spread)
         top = apply_threshold(wgt, float(s.threshold))
         if kind == KIND_DISK:
             self.last_depletion = wgt

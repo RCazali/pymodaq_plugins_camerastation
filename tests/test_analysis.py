@@ -66,6 +66,45 @@ def test_beam_off_is_invalid_without_any_setting(binning, background):
     assert faint['valid'] == 1.0                         # 3 sigma per pixel, but 25 x 18 px wide
 
 
+def _profile(points, n):
+    return np.interp(np.linspace(0, len(points) - 1, n), np.arange(len(points)), points)
+
+
+def lab_background(kind, rng, shape=(1024, 1280)):
+    """8-bit frames without beam measured on computer B (2026-10-22): Plasma = vignetting dome of ~0.7 count
+    at 5 counts, pixel noise 0.36; Focus = horizontal bands of ~1 count at 6 counts, noise 0.59, hot pixels."""
+    h, w = shape
+    if kind == 'dome':
+        col = _profile([4.53, 4.76, 4.86, 4.89, 4.90, 4.94, 4.89, 4.77, 4.58, 4.25], w)
+        row = _profile([4.64, 4.60, 4.74, 4.79, 4.81, 4.82, 4.89, 4.88, 4.82, 4.73], h)
+        img = (row[:, None] - row.mean()) + col[None, :] + rng.normal(0, 0.36, shape)
+    else:
+        row = _profile([6.22, 5.69, 5.87, 5.91, 4.76, 4.96, 5.97, 5.85, 6.29, 6.10], h)
+        img = row[:, None] + rng.normal(0, 0.59, shape)
+        for (y, x, v) in ((11, 1211, 18), (491, 1025, 14), (821, 908, 45)):
+            img[y, x] = v
+    return img
+
+
+@pytest.mark.parametrize('kind', ['dome', 'bands'])
+def test_lab_cameras_without_beam_are_invalid(kind):
+    """Computer B published valid = 1 and a centroid without beam: the block means of a dome / of bands vary
+    much more than the pixel noise (0 on an 8-bit sensor at 5 counts) predicts."""
+    rng = np.random.default_rng(3)
+    a = CameraAnalyzer(cfg(kind='beam', binning=2, background='border', threshold=0.05))
+    for _ in range(5):
+        img = np.clip(np.rint(lab_background(kind, rng)), 0, 255).astype(np.uint8)
+        r = a.analyze(img)
+        assert r['valid'] == 0.0 and math.isnan(r['x'])
+        assert a.last_reason == 'no signal above the noise'
+    yy, xx = np.ogrid[:1024, :1280]
+    spot = np.exp(-((xx - 640.0) ** 2 + (yy - 500.0) ** 2) / (2 * 30.0 ** 2))
+    faint = a.analyze(np.clip(np.rint(lab_background(kind, rng) + 3.0 * spot), 0, 255).astype(np.uint8))
+    assert faint['valid'] == 1.0                       # 3 counts at the peak: seen (its centroid biased by the dome)
+    r = a.analyze(np.clip(np.rint(lab_background(kind, rng) + 40.0 * spot), 0, 255).astype(np.uint8))
+    assert r['valid'] == 1.0 and r['x'] == pytest.approx(640, abs=5) and r['y'] == pytest.approx(500, abs=5)
+
+
 def test_beam_filling_the_roi_and_noiseless_frames_stay_valid():
     img = beam_frame(x=320.0, y=240.0, sx=25.0, sy=18.0, noise=10.0, rng=RNG)
     assert CameraAnalyzer(cfg(roi=[295, 222, 50, 36], binning=1)).analyze(img)['valid'] == 1.0

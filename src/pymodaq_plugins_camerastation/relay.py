@@ -13,11 +13,16 @@ from qtpy.QtCore import QObject, Signal
 
 from pymodaq_data.data import DataToExport, DataWithAxes
 
-try:  # PyMoDAQ 5.1: the 0D viewer has one pen per channel taken from plot_colors, a Data0D with more channels
-    from pymodaq_utils.utils import plot_colors     # raises IndexError in DAQ_Viewer.show_data, before
-    MAX_PLOTTED_CHANNELS = len(plot_colors)         # grab_done_signal: nothing reaches the dashboard
-except ImportError:  # PyMoDAQ 5.3: the viewer cycles through its colors
-    MAX_PLOTTED_CHANNELS = None
+# The 0D viewer of PyMoDAQ 5.1 has one pen per channel taken from plot_colors of its config (7 by default, 6 on
+# computer B): a Data0D with more channels raises IndexError in DAQ_Viewer.show_data before grab_done_signal,
+# here *and in the LECO viewer of computer A*, which may run 5.1 while this station runs 5.3 (whose viewer cycles
+# its colors). So the limit holds whatever the local version: the smallest palette seen, or the local one.
+PALETTE_5_1 = 6
+try:
+    from pymodaq_utils.utils import plot_colors
+    MAX_PLOTTED_CHANNELS = min(len(plot_colors), PALETTE_5_1)
+except ImportError:  # PyMoDAQ 5.3
+    MAX_PLOTTED_CHANNELS = PALETTE_5_1
 
 
 def payload_to_dte(payload: Dict[str, Dict[str, float]]) -> DataToExport:

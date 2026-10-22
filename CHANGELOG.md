@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.4 — 2026-10-22
+
+- **Fix: the real cameras of computer B published a centroid (valid = 1) without any beam.** Their background is
+  not white noise: a vignetting dome (Plasma) or horizontal bands (Focus) of about one count make the block means
+  vary 4 to 8 times more than the pixel noise predicts (an 8-bit sensor at 5 counts even gives a pixel noise of
+  0). The brightest block must now also stand out of the robust spread (1.4826 MAD) of the background blocks by
+  the same factor 6; in a small ROI or mask (< 100 blocks) the pixel noise test alone applies, as before. A beam
+  of 3 counts on these backgrounds is still seen. Tests with backgrounds modelled on the measured ones.
+- **Fix: a station on PyMoDAQ 5.3 crashed the LECO viewer of a computer A on 5.1** (`IndexError` in viewer0D):
+  groups of more than 6 channels are sent with `do_plot=False` whatever the local PyMoDAQ version (5.3 has no
+  `plot_colors` and plotted everything).
+- `tools/leco_link_check` sender: a new result at each publication (age 0.1 s).
+
 ## 0.3.3 — 2026-10-22
 
 - **`tools/add_relay`**: copies a preset of computer B (the source is only read) and adds the `CameraStation`
