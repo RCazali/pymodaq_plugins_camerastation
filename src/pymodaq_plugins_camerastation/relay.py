@@ -13,16 +13,27 @@ from qtpy.QtCore import QObject, Signal
 
 from pymodaq_data.data import DataToExport, DataWithAxes
 
+try:  # PyMoDAQ 5.1: the 0D viewer has one pen per channel taken from plot_colors, a Data0D with more channels
+    from pymodaq_utils.utils import plot_colors     # raises IndexError in DAQ_Viewer.show_data, before
+    MAX_PLOTTED_CHANNELS = len(plot_colors)         # grab_done_signal: nothing reaches the dashboard
+except ImportError:  # PyMoDAQ 5.3: the viewer cycles through its colors
+    MAX_PLOTTED_CHANNELS = None
+
 
 def payload_to_dte(payload: Dict[str, Dict[str, float]]) -> DataToExport:
-    """One Data0D per data name, one channel per label (labels kept, so the keys are stable)."""
+    """One Data0D per data name, one channel per label (labels kept, so the keys are stable).
+
+    A Data0D with more channels than the 0D viewer can draw is sent with ``do_plot=False``: exported
+    (LECO, grab_done) but not plotted, here and in the viewer of computer A (the attribute is serialized).
+    """
     data = []
     for name, values in payload.items():
         labels = list(values)
         if not labels:
             continue
+        extra = {'do_plot': False} if MAX_PLOTTED_CHANNELS and len(labels) > MAX_PLOTTED_CHANNELS else {}
         data.append(DataWithAxes(name=name, source='calculated', dim='Data0D', labels=labels,
-                                 data=[np.array([float(values[lab])]) for lab in labels]))
+                                 data=[np.array([float(values[lab])]) for lab in labels], **extra))
     return DataToExport(name='CameraStation', data=data)
 
 

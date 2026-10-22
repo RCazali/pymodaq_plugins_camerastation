@@ -85,6 +85,55 @@ def station(tmp_path_factory):
     wait(lambda: False, 0.5)
 
 
+def test_relay_with_its_viewer_accepts_many_channels():
+    """A beam camera publishes 10 values, more than the colors of the 0D viewer: the relay shown in a
+    dashboard (with its viewer) must still emit grab_done and send everything (bug seen on computer B)."""
+    import logging
+    from pymodaq_gui.utils.dock import DockArea
+    from pymodaq.control_modules.daq_viewer import DAQ_Viewer
+    from pymodaq_plugins_camerastation.core.settings import LABELS
+    from pymodaq_plugins_camerastation.relay import bus
+    app()
+    errors = []
+
+    class Catch(logging.Handler):
+        def emit(self, record):
+            if record.levelno >= logging.ERROR:
+                errors.append(record.getMessage())
+
+    handler = Catch()
+    logging.getLogger().addHandler(handler)
+    win = QtWidgets.QMainWindow()
+    area = DockArea()
+    win.setCentralWidget(area)
+    det = DAQ_Viewer(area, title='Relay with viewer')
+    try:
+        det.daq_type = 'DAQ0D'
+        det.detector = 'CameraStation'
+        inits = []
+        det.init_signal.connect(inits.append)
+        det.init_hardware(True)
+        assert wait(lambda: inits, 20) and inits[-1]
+        received = []
+        det.grab_done_signal.connect(received.append)
+        det.grab()
+        wait(lambda: False, 0.3)
+        disk = {lab: 1.0 for lab in LABELS['disk']}
+        disk.update(age=0.1, frame=3.0)
+        bus.publish({'Disk': disk, 'Stats': {'frame_counter': 1.0}})
+        assert wait(lambda: received, 5), f'no grab_done, errors: {errors}'
+        assert not [e for e in errors if 'index out of range' in e]
+        assert list(next(d for d in received[-1] if d.name == 'Disk').labels) == list(disk)
+    finally:
+        logging.getLogger().removeHandler(handler)
+        try:
+            det.stop_grab()
+            det.quit_fun()
+        except Exception:
+            pass
+        wait(lambda: False, 0.3)
+
+
 def test_relay_excluded_from_cameras(station):
     st, *_ = station
     assert st.available_detectors() == ['Disk cam', 'Output cam']
