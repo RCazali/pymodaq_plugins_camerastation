@@ -433,6 +433,24 @@ class CameraStationApp(QtCore.QObject):
         key = self._leco_keyword(det)
         return not key or bool(getattr(det, f'_{key}', True))
 
+    def _ensure_relay_leco(self, det):
+        """A relay with a LECO name in its settings (preset made by tools/add_relay) is connected to the
+        coordinator here, once. "Connect" cannot be saved ticked in a PyMoDAQ 5.1 preset: the dashboard restores
+        it before the host and the port, so the module would connect to the default address."""
+        try:
+            leco = det.settings.child('main_settings', 'leco')
+            if not leco['leco_name'] or leco['leco_connected'] or getattr(det, '_cs_leco_requested', False):
+                return
+            det._cs_leco_requested = True
+            if leco['connect_leco_server']:
+                det.connect_leco(True)
+            else:
+                leco.child('connect_leco_server').setValue(True)     # its change signal connects the module
+            self.log.add(f'{getattr(det, "title", "relay")}: LECO connection to {leco["host"]}:{leco["port"]} '
+                         f'as "{leco["leco_name"]}"')
+        except Exception as e:
+            self.log.add(f'{getattr(det, "title", "?")}: LECO connection failed: {e}', logging.WARNING)
+
     def _start_relay(self, det):
         """Grab of the relay with its data forwarded to LECO: computer A receives the values whoever started
         the grab. A plain DAQ_Viewer grab (started from this station or the dashboard Grab button) never
@@ -442,6 +460,7 @@ class CameraStationApp(QtCore.QObject):
         try:
             if not getattr(det, 'initialized_state', True):
                 return
+            self._ensure_relay_leco(det)
             grabbing = bool(getattr(det, 'grab_state', False))
             if grabbing and self._relay_forwards(det):
                 return

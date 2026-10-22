@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.3 — 2026-10-22
+
+- **`tools/add_relay`**: copies a preset of computer B (the source is only read) and adds the `CameraStation`
+  relay with the LECO address of computer A and its LECO name.
+- **The station connects a relay that has a LECO name** to the coordinator when it starts it. "Connect" cannot be
+  saved ticked in a PyMoDAQ 5.1 preset: the dashboard restores it before the host and the port.
+- **`tools/leco_link_check`** (sender / receiver) and **`tools/leco_station_check`** (simulated cameras → station
+  → relay, station files in a temporary folder): test the LECO link B → A without hardware.
+
 ## 0.3.2 — 2026-10-22
 
 - **Fix: the relay sent nothing to the dashboard on PyMoDAQ 5.1** (`list index out of range` in

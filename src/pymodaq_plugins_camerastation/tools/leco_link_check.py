@@ -69,8 +69,8 @@ class _Errors(logging.Handler):
         self.messages.append(record.getMessage())
 
 
-def _viewer(title, plugin):
-    """A 0D DAQ_Viewer with its user interface (plot), like in a dashboard"""
+def _viewer(title, plugin, daq_type='DAQ0D'):
+    """A DAQ_Viewer with its user interface (plot), like in a dashboard"""
     from qtpy import QtWidgets
     from pymodaq_gui.utils.dock import DockArea
     from pymodaq.control_modules.daq_viewer import DAQ_Viewer
@@ -80,7 +80,7 @@ def _viewer(title, plugin):
     win.setWindowTitle(f'leco_link_check: {title}')
     win.show()
     det = DAQ_Viewer(area, title=title)
-    det.daq_type = 'DAQ0D'
+    det.daq_type = daq_type
     det.detector = plugin
     det._link_check_window = win
     return det
