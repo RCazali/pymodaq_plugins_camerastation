@@ -3,8 +3,9 @@
 ## 0.3.2 — 2026-10-22
 
 - **Fix: the relay sent nothing to the dashboard on PyMoDAQ 5.1** (`list index out of range` in
-  `DAQ_Viewer.show_data`, logged at every publication). The 0D viewer of PyMoDAQ 5.1 has 7 pen colors, a beam
-  camera publishes 10 values and a disk camera 12: plotting raised before `grab_done_signal`. A camera with more
+  `DAQ_Viewer.show_data`, logged at every publication). The 0D viewer of PyMoDAQ 5.1 takes one pen per channel
+  from `plot_colors` of the PyMoDAQ config (7 by default, 6 on computer B), without cycling; a beam camera
+  publishes 10 values and a disk camera 12: plotting raised before `grab_done_signal`. A camera with more
   values than the viewer can draw is now sent with `do_plot=False`: exported and sent to LECO as before, not
   plotted (the trends of the station show them). PyMoDAQ 5.3 cycles its colors and plots everything.
 
