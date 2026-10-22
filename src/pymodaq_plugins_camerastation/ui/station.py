@@ -147,6 +147,7 @@ class CameraStationApp(QtCore.QObject):
         self.engine.on_error = lambda cid, msg: self.log.add(f'{cid}: analysis error: {msg}', logging.ERROR)
         self.publisher = Publisher()
         self._relay_wanted = False          # the relay must grab (and forward to LECO): see _keep_relay
+        self._cams_wanted: Dict[str, float] = {}   # camera id -> time of the last (re)start: see _keep_cameras
         self.writer: Optional[H5StationWriter] = None
         self.watcher = TriggerWatcher(self.station.trigger_folder)
         self._links: Dict[str, tuple] = {}               # cam id -> (viewer, slot)
@@ -486,6 +487,39 @@ class CameraStationApp(QtCore.QObject):
                 self.log.add(f'{getattr(det, "title", "relay")}: relay (re)started with LECO forwarding')
                 self._start_relay(det)
 
+    def _keep_cameras(self):
+        """PyMoDAQ 5.3 leaves ``grab_state`` True when a module is closed while grabbing: once initialised again
+        it says it grabs but sends nothing (and its Grab button, a toggle, would stop it). A camera started from
+        the station that sent no frame for ``stale_s`` while "grabbing" is restarted (stop, then grab at the next
+        tick), at most once per ``max(2 stale_s, 5 s)``. A camera stopped on purpose is left stopped."""
+        now = time.monotonic()
+        for cam_id, last in list(self._cams_wanted.items()):
+            link = self._links.get(cam_id)
+            if link is None:
+                continue
+            det = link[0]
+            if not getattr(det, 'initialized_state', True):
+                continue
+            stale = float(self.station.stale_s)
+            if now - last < max(2.0 * stale, 5.0):
+                continue
+            rt = self.engine.cameras.get(cam_id)
+            last_frame = getattr(rt, 'last_frame_mono', None) if rt is not None else None
+            grabbing = bool(getattr(det, 'grab_state', False))
+            restarting = last == -math.inf
+            if restarting:                                  # stopped at the previous tick: grab again
+                self._cams_wanted[cam_id] = now
+                self._start_viewer(det)
+                continue
+            silent = last_frame is None or self.engine.clock() - last_frame > stale
+            if not (grabbing and silent):
+                continue
+            cam = self.station.camera(cam_id)
+            self.log.add(f'{cam.name if cam else cam_id}: no frame for {stale:g} s while grabbing: camera restarted',
+                         logging.WARNING)
+            self._stop_viewer(det)
+            self._cams_wanted[cam_id] = -math.inf          # grabbed again at the next tick, once really stopped
+
     def _stop_viewer(self, det):
         try:
             if bool(getattr(det, 'grab_state', False)):
@@ -506,10 +540,12 @@ class CameraStationApp(QtCore.QObject):
         """Starts (or stops) the grab of the camera viewers used by the station and of the relay."""
         if not start:
             self._relay_wanted = False
-        for det in [self._links[c][0] for c in self._links]:
+        for cam_id, (det, _slot) in list(self._links.items()):
             if start:
+                self._cams_wanted[cam_id] = time.monotonic()
                 self._start_viewer(det)
             else:
+                self._cams_wanted.pop(cam_id, None)
                 self._stop_viewer(det)
         for det in self.relay_viewers():
             if start:
@@ -524,10 +560,12 @@ class CameraStationApp(QtCore.QObject):
         if det is None:
             return
         if start:
+            self._cams_wanted[cam_id] = time.monotonic()
             self._start_viewer(det)
             for relay in self.relay_viewers():
                 self._start_relay(relay)
         else:
+            self._cams_wanted.pop(cam_id, None)
             self._stop_viewer(det)
 
     def snap_camera(self, cam_id: str):
@@ -1287,6 +1325,7 @@ class CameraStationApp(QtCore.QObject):
             return
         try:
             self._keep_relay()
+            self._keep_cameras()
             for line in self.log.take_new():
                 self.log_view.appendPlainText(line)
             self._initial_sizes()
