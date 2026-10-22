@@ -121,7 +121,7 @@ def sender(host: str, port: int, name: str, seconds: float, rate_hz: float) -> i
             restarts += 1
         sent += 1
         cam = {lab: float(sent) for lab in BEAM}
-        cam['valid'] = 1.0
+        cam.update(valid=1.0, age=0.1)               # a new result at each publication, taken 0.1 s before
         bus.publish({'Cam1': cam, 'Stats': {'frame_counter': float(sent), 't_wall': time.time()}})
         _wait(timeout=1.0 / rate_hz)
         if time.time() >= next_report:
